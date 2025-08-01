@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QPushButton, QLabel, QLineEdit, QTextEdit, QComboBox,
                              QMessageBox, QStackedWidget, QFormLayout, QDialog, QTableWidget,
                              QTableWidgetItem, QScrollArea, QProgressBar, QListWidget, QListWidgetItem,
-                             QCalendarWidget, QDialogButtonBox, QSpinBox, QGridLayout, QFrame, QFileDialog)
+                             QCalendarWidget, QDialogButtonBox, QSpinBox, QGridLayout, QFrame, QFileDialog, QInputDialog)
 from PyQt6.QtCore import Qt, QTimer, QDate, QLocale
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -79,8 +79,11 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS users (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  username TEXT UNIQUE,
-                 password TEXT,
-                 is_admin INTEGER DEFAULT 0)''')
+                 password TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS managers (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 username TEXT UNIQUE,
+                 password TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS stress_levels (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  user_id INTEGER,
@@ -115,6 +118,12 @@ def init_db():
     columns = {row[1] for row in c.fetchall()}
     if 'duration_percentage' not in columns:
         c.execute("ALTER TABLE stress_levels ADD COLUMN duration_percentage REAL DEFAULT 0.0")
+    c.execute("SELECT id, username, password, is_admin FROM users WHERE is_admin=1")
+    admin_users = c.fetchall()
+    for admin in admin_users:
+        c.execute("INSERT OR IGNORE INTO managers (id, username, password) VALUES (?, ?, ?)",
+                  (admin[0], admin[1], admin[2]))
+        c.execute("DELETE FROM users WHERE id=?", (admin[0],))
     conn.commit()
     conn.close()
 
@@ -269,17 +278,21 @@ class LoginDialog(QDialog):
             return
         conn = sqlite3.connect('mbsr_data.db')
         c = conn.cursor()
-        if self.username.text() == "manager" and self.password.text() == "manager":
-            self.user_id = 0
+        c.execute("SELECT id FROM managers WHERE username=? AND password=?",
+                  (self.username.text(), self.password.text()))
+        manager = c.fetchone()
+        if manager:
+            self.user_id = manager[0]
             self.is_admin = True
             conn.close()
             self.accept()
             return
-        c.execute("SELECT id, is_admin FROM users WHERE username=? AND password=?",
+        c.execute("SELECT id FROM users WHERE username=? AND password=?",
                   (self.username.text(), self.password.text()))
         user = c.fetchone()
         if user:
-            self.user_id, self.is_admin = user
+            self.user_id = user[0]
+            self.is_admin = False
             c.execute("INSERT INTO login_history (user_id, login_date) VALUES (?, ?)",
                       (self.user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
             conn.commit()
@@ -293,29 +306,30 @@ class LoginDialog(QDialog):
         if not self.username.text() or not self.password.text():
             QMessageBox.warning(self, "Error", "Username and password cannot be empty")
             return
-        if self.username.text() == "manager":
-            QMessageBox.warning(self, "Error", "Username 'manager' is reserved")
-            return
         conn = sqlite3.connect('mbsr_data.db')
         c = conn.cursor()
-        c.execute("INSERT INTO users (username, password) VALUES (?, ?)",
-                  (self.username.text(), self.password.text()))
-        user_id = c.lastrowid
-        rewards = [
-            ("Three Day Login", "Log in for three consecutive days"),
-            ("Three Day Exercise", "Complete exercises for three consecutive days"),
-            ("Ten Exercises Completed", "Complete 10 exercises in total"),
-            ("First Community Post", "Share your first community post"),
-            ("Stress Reduction Master", "Reduce stress level in three consecutive exercises"),
-            ("Perfect Week", "Complete at least one exercise each day for a week"),
-            ("Mindful Master", "Complete 50 Mindful Breathing exercises")
-        ]
-        for name, desc in rewards:
-            c.execute("INSERT INTO rewards (user_id, reward_name, reward_description, earned) VALUES (?, ?, ?, ?)",
-                      (user_id, name, desc, 0))
-        conn.commit()
-        conn.close()
-        QMessageBox.information(self, "Success", "Registration successful! Please login.")
+        try:
+            c.execute("INSERT INTO users (username, password) VALUES (?, ?)",
+                      (self.username.text(), self.password.text()))
+            user_id = c.lastrowid
+            rewards = [
+                ("Three Day Login", "Log in for three consecutive days"),
+                ("Three Day Exercise", "Complete exercises for three consecutive days"),
+                ("Ten Exercises Completed", "Complete 10 exercises in total"),
+                ("First Community Post", "Share your first community post"),
+                ("Stress Reduction Master", "Reduce stress level in three consecutive exercises"),
+                ("Perfect Week", "Complete at least one exercise each day for a week"),
+                ("Mindful Master", "Complete 50 Mindful Breathing exercises")
+            ]
+            for name, desc in rewards:
+                c.execute("INSERT INTO rewards (user_id, reward_name, reward_description, earned) VALUES (?, ?, ?, ?)",
+                          (user_id, name, desc, 0))
+            conn.commit()
+            QMessageBox.information(self, "Success", "Registration successful! Please login.")
+        except sqlite3.IntegrityError:
+            QMessageBox.warning(self, "Error", "Username already exists")
+        finally:
+            conn.close()
 
 class MBSRApp(QMainWindow):
     def __init__(self):
@@ -373,11 +387,11 @@ class MBSRApp(QMainWindow):
         self.page_stack.setCurrentWidget(self.home_page)
 
     def export_user_data(self, user_id=None):
-        if self.user_id is None and not self.is_admin:
-            QMessageBox.warning(self, "Login Required", "Please login to export data")
-            return
         if self.is_admin and user_id is None:
             QMessageBox.warning(self, "Error", "Please select a user to export data")
+            return
+        if not self.is_admin and self.user_id is None:
+            QMessageBox.warning(self, "Login Required", "Please login to export data")
             return
         user_id_to_export = user_id if self.is_admin else self.user_id
         conn = sqlite3.connect('mbsr_data.db')
@@ -406,7 +420,7 @@ class MBSRApp(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to export data: {str(e)}")
 
     def navigate(self, page):
-        if self.user_id is None and page != "register, login / Hi name" and page != f"Hi {self.username}":
+        if self.user_id is None and page != "Login" and page != f"Hi {self.username}":
             QMessageBox.warning(self, "Login Required", "Please login to access this feature")
             self.show_login_dialog()
             return
@@ -414,9 +428,15 @@ class MBSRApp(QMainWindow):
             self.page_stack.setCurrentWidget(self.home_page)
             self.update_pressure_diagram()
         elif page == "View Dashboard":
+            if self.is_admin:
+                QMessageBox.warning(self, "Access Denied", "Managers cannot access dashboard")
+                return
             self.page_stack.setCurrentWidget(self.dashboard_page)
             QTimer.singleShot(100, self.update_dashboard)
         elif page == "Get Reward":
+            if self.is_admin:
+                QMessageBox.warning(self, "Access Denied", "Managers cannot access rewards")
+                return
             self.page_stack.setCurrentWidget(self.reward_page)
             self.update_reward_page()
         elif page == "Exercises List":
@@ -433,7 +453,7 @@ class MBSRApp(QMainWindow):
         elif page == "Manage Community":
             self.page_stack.setCurrentWidget(self.manage_community_page)
             self.update_manage_community()
-        elif page == "Logout" or page == "register, login / Hi name" or page == f"Hi {self.username}":
+        elif page == "Logout" or page == "Login" or page == f"Hi {self.username}":
             if self.user_id is None and not self.is_admin:
                 self.show_login_dialog()
             else:
@@ -469,12 +489,16 @@ class MBSRApp(QMainWindow):
         return page
 
     def start_exercise(self):
+        if self.is_admin:
+            QMessageBox.warning(self, "Access Denied", "Managers cannot access exercises")
+            return
         if self.user_id is None:
             QMessageBox.warning(self, "Login Required", "Please login to access exercises")
             if not self.show_login_dialog():
                 self.page_stack.setCurrentWidget(self.home_page)
                 return
         self.page_stack.setCurrentWidget(self.exercise_assessment_page)
+
     def create_dashboard_page(self):
         page = QWidget()
         layout = QVBoxLayout()
@@ -713,7 +737,7 @@ class MBSRApp(QMainWindow):
         return page
 
     def update_reward_page(self):
-        if self.user_id is None:
+        if self.user_id is None or self.is_admin:
             for widget, _ in self.reward_widgets:
                 widget.setStyleSheet("border: 1px solid gray; padding: 10px;")
                 for child in widget.findChildren(QLabel):
@@ -738,7 +762,7 @@ class MBSRApp(QMainWindow):
         conn.close()
 
     def check_and_award_rewards(self):
-        if self.user_id is None:
+        if self.user_id is None or self.is_admin:
             return
         conn = sqlite3.connect('mbsr_data.db')
         c = conn.cursor()
@@ -860,7 +884,7 @@ class MBSRApp(QMainWindow):
     def update_manage_user(self):
         conn = sqlite3.connect('mbsr_data.db')
         c = conn.cursor()
-        c.execute("SELECT id, username FROM users WHERE username != 'manager'")
+        c.execute("SELECT id, username FROM users")
         users = c.fetchall()
         self.user_table.setRowCount(len(users))
         for i, (user_id, username) in enumerate(users):
@@ -986,6 +1010,9 @@ class MBSRApp(QMainWindow):
             QMessageBox.information(self, "Success", "Post deleted successfully")
 
     def assess_stress(self):
+        if self.is_admin:
+            QMessageBox.warning(self, "Access Denied", "Managers cannot access exercises")
+            return
         if self.user_id is None:
             QMessageBox.warning(self, "Login Required", "Please login to access exercises")
             if not self.show_login_dialog():
@@ -997,6 +1024,9 @@ class MBSRApp(QMainWindow):
         self.recommend_exercise()
 
     def recommend_exercise(self):
+        if self.is_admin:
+            QMessageBox.warning(self, "Access Denied", "Managers cannot access exercises")
+            return
         if self.user_id is None:
             QMessageBox.warning(self, "Login Required", "Please login to access exercises")
             if not self.show_login_dialog():
@@ -1086,6 +1116,9 @@ class MBSRApp(QMainWindow):
         self.page_stack.setCurrentWidget(self.exercise_completion_page)
 
     def submit_exercise(self):
+        if self.is_admin:
+            QMessageBox.warning(self, "Access Denied", "Managers cannot submit exercises")
+            return
         if self.user_id is None:
             QMessageBox.warning(self, "Login Required", "Please login to submit")
             if not self.show_login_dialog():
@@ -1165,6 +1198,9 @@ class MBSRApp(QMainWindow):
         return page
 
     def share_post(self):
+        if self.is_admin:
+            QMessageBox.warning(self, "Access Denied", "Managers cannot post in community")
+            return
         if self.user_id is None:
             QMessageBox.warning(self, "Login Required", "Please login to post")
             if not self.show_login_dialog():
@@ -1190,7 +1226,15 @@ class MBSRApp(QMainWindow):
         if login_dialog.exec():
             self.user_id = login_dialog.user_id
             self.is_admin = login_dialog.is_admin
-            self.username = login_dialog.username.text() if login_dialog.username.text() else "Manager"
+            conn = sqlite3.connect('mbsr_data.db')
+            c = conn.cursor()
+            if self.is_admin:
+                c.execute("SELECT username FROM managers WHERE id=?", (self.user_id,))
+            else:
+                c.execute("SELECT username FROM users WHERE id=?", (self.user_id,))
+            username = c.fetchone()
+            self.username = username[0] if username else "Manager"
+            conn.close()
             self.update_navigation_bar()
             self.check_and_award_rewards()
             if self.is_admin:
@@ -1222,32 +1266,16 @@ class MBSRApp(QMainWindow):
             self.nav_buttons.append(button)
 
     def logout(self):
-        # 重置用户状态
         self.user_id = None
         self.is_admin = False
         self.username = "Guest"
         self.stress_before_level = None
         self.current_exercise = None
         self.timer_count = 0
-
-        # 停止可能运行的计时器
         if hasattr(self, 'timer') and self.timer.isActive():
             self.timer.stop()
             del self.timer
-
-        # 重新初始化界面
         self.init_ui()
-
-    def update_ui_after_login(self):
-        if self.is_admin:
-            nav_button_texts = ["Manage User", "Manage Exercise", "Manage Community"]
-        else:
-            nav_button_texts = ["Home", "View Dashboard", "Get Reward", "Exercises List", "Community",
-                                f"Hi {self.username}"]
-        for i, button in enumerate(self.nav_buttons):
-            button.setText(nav_button_texts[i])
-            button.clicked.disconnect()
-            button.clicked.connect(lambda checked, b=nav_button_texts[i]: self.navigate(b))
 
     def get_motivational_quote(self):
         quotes = [
@@ -1316,6 +1344,15 @@ class MBSRApp(QMainWindow):
         canvas.draw()
 
     def update_pressure_diagram(self):
+        if self.is_admin:
+            self.canvas.axes.clear()
+            self.canvas.axes.text(0.5, 0.5, "Managers cannot view stress data",
+                                  horizontalalignment='center',
+                                  verticalalignment='center',
+                                  transform=self.canvas.axes.transAxes)
+            self.canvas.axes.set_title("Pressure Change Diagram")
+            self.canvas.draw()
+            return
         conn = sqlite3.connect('mbsr_data.db')
         c = conn.cursor()
         c.execute(
@@ -1326,6 +1363,12 @@ class MBSRApp(QMainWindow):
         self.plot_stress_diagram(self.canvas, "Pressure Change Diagram", data)
 
     def update_dashboard(self, selected_date=None):
+        if self.is_admin:
+            self.progress_label.setText("Managers cannot view progress")
+            self.date_label.setText("Managers cannot view records")
+            self.canvas_dashboard.hide()
+            self.session_table.setRowCount(0)
+            return
         if self.user_id is None:
             self.progress_label.setText("Please login to view your progress")
             self.date_label.setText("Please login to view records")
@@ -1369,12 +1412,14 @@ class MBSRApp(QMainWindow):
         self.update_dashboard(selected_date)
 
     def show_comment_dialog(self, frame):
+        if self.is_admin:
+            QMessageBox.warning(self, "Access Denied", "Managers cannot comment")
+            return
         if self.user_id is None:
             QMessageBox.warning(self, "Login Required", "Please login to comment")
             if not self.show_login_dialog():
                 self.page_stack.setCurrentWidget(self.home_page)
                 return
-        from PyQt6.QtWidgets import QInputDialog
         post_id = frame.property("post_id")
         comment, ok = QInputDialog.getText(self, "Add Comment", "Enter your comment:")
         if ok and comment:
