@@ -1,5 +1,6 @@
 import sys
 import sqlite3
+import csv
 from datetime import datetime, timedelta
 import random
 import builtins
@@ -7,7 +8,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QPushButton, QLabel, QLineEdit, QTextEdit, QComboBox,
                              QMessageBox, QStackedWidget, QFormLayout, QDialog, QTableWidget,
                              QTableWidgetItem, QScrollArea, QProgressBar, QListWidget, QListWidgetItem,
-                             QCalendarWidget, QDialogButtonBox, QSpinBox, QGridLayout, QFrame)
+                             QCalendarWidget, QDialogButtonBox, QSpinBox, QGridLayout, QFrame, QFileDialog)
 from PyQt6.QtCore import Qt, QTimer, QDate, QLocale
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -138,9 +139,22 @@ class UserDetailsDialog(QDialog):
             ["Date", "Exercise", "Stress Before", "Stress After", "Completion %", "Notes"])
         self.layout.addWidget(self.session_table)
         self.update_session_table()
+        button_layout = QHBoxLayout()
         delete_btn = QPushButton("Delete User")
         delete_btn.clicked.connect(self.delete_user)
-        self.layout.addWidget(delete_btn)
+        button_layout.addWidget(delete_btn)
+        export_btn = QPushButton("Export User Data")
+        export_btn.clicked.connect(lambda: self.parent().export_user_data(self.user_id))
+        export_btn.setStyleSheet("""
+            font-size: 14px;
+            padding: 8px;
+            background-color: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 5px;
+        """)
+        button_layout.addWidget(export_btn)
+        self.layout.addLayout(button_layout)
         self.setLayout(self.layout)
 
     def update_stress_diagram(self):
@@ -323,10 +337,9 @@ class MBSRApp(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
         self.nav_layout = QHBoxLayout()
         if self.is_admin:
-            nav_button_texts = ["Manage User", "Manage Exercise", "Manage Community"]
+            nav_button_texts = ["Manage User", "Manage Exercise", "Manage Community", "Logout"]
         else:
-            nav_button_texts = ["Home", "View Dashboard", "Get Reward", "Exercises List", "Community",
-                                f"Hi {self.username}"]
+            nav_button_texts = ["Home", "View Dashboard", "Get Reward", "Exercises List", "Community", "Login"]
         for text in nav_button_texts:
             button = QPushButton(text)
             button.clicked.connect(lambda checked, b=text: self.navigate(b))
@@ -357,7 +370,40 @@ class MBSRApp(QMainWindow):
         self.page_stack.addWidget(self.manage_exercise_page)
         self.page_stack.addWidget(self.manage_community_page)
         main_layout.addWidget(self.page_stack)
-        self.page_stack.setCurrentWidget(self.manage_user_page if self.is_admin else self.home_page)
+        self.page_stack.setCurrentWidget(self.home_page)
+
+    def export_user_data(self, user_id=None):
+        if self.user_id is None and not self.is_admin:
+            QMessageBox.warning(self, "Login Required", "Please login to export data")
+            return
+        if self.is_admin and user_id is None:
+            QMessageBox.warning(self, "Error", "Please select a user to export data")
+            return
+        user_id_to_export = user_id if self.is_admin else self.user_id
+        conn = sqlite3.connect('mbsr_data.db')
+        c = conn.cursor()
+        c.execute(
+            "SELECT date, exercise_type, stress_before, stress_after, duration_percentage, notes FROM stress_levels WHERE user_id=? ORDER BY date",
+            (user_id_to_export,))
+        data = c.fetchall()
+        conn.close()
+        if not data:
+            QMessageBox.information(self, "No Data", "No exercise data available to export.")
+            return
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Data", f"exercise_data_{self.username}.csv",
+                                                   "CSV Files (*.csv)")
+        if file_path:
+            try:
+                with open(file_path, 'w', newline='', encoding='utf-8') as csvfile:
+                    writer = csv.writer(csvfile)
+                    writer.writerow(["Date", "Exercise", "Stress Before", "Stress After", "Completion %", "Notes"])
+                    for row in data:
+                        writer.writerow(
+                            [row[0], row[1], row[2], row[3], round(float(row[4]), 1) if row[4] is not None else 0.0,
+                             row[5] or ""])
+                QMessageBox.information(self, "Success", f"Data exported successfully to {file_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to export data: {str(e)}")
 
     def navigate(self, page):
         if self.user_id is None and page != "register, login / Hi name" and page != f"Hi {self.username}":
@@ -387,8 +433,8 @@ class MBSRApp(QMainWindow):
         elif page == "Manage Community":
             self.page_stack.setCurrentWidget(self.manage_community_page)
             self.update_manage_community()
-        elif page == "register, login / Hi name" or page == f"Hi {self.username}":
-            if self.user_id is None:
+        elif page == "Logout" or page == "register, login / Hi name" or page == f"Hi {self.username}":
+            if self.user_id is None and not self.is_admin:
                 self.show_login_dialog()
             else:
                 self.logout()
@@ -401,13 +447,21 @@ class MBSRApp(QMainWindow):
         layout.addWidget(self.canvas)
         lets_go_btn = QPushButton("Let's Go!")
         lets_go_btn.clicked.connect(self.start_exercise)
+        lets_go_btn.setFixedSize(120, 40)
+        lets_go_btn.setStyleSheet("""
+            font-size: 14px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+        """)
         layout.addWidget(lets_go_btn, alignment=Qt.AlignmentFlag.AlignCenter)
         quote_label = QLabel(self.get_motivational_quote())
-        quote_label.setStyleSheet("border: 1px solid gray; padding: 10px; color: #E0E0E0; background-color: #222;")
+        quote_label.setStyleSheet("border: 1px solid gray; padding: 1px; color: #222;")
         quote_label.setWordWrap(True)
         layout.addWidget(quote_label)
         comment_label = QLabel(self.get_sample_comment())
-        comment_label.setStyleSheet("border: 1px solid gray; padding: 10px; color: #E0E0E0; background-color: #222; cursor: pointer;")
+        comment_label.setStyleSheet("border: 1px solid gray; padding: 1px; color: #222;  cursor: pointer;")
         comment_label.setWordWrap(True)
         comment_label.mousePressEvent = lambda event: self.navigate("Community")
         layout.addWidget(comment_label)
@@ -421,7 +475,6 @@ class MBSRApp(QMainWindow):
                 self.page_stack.setCurrentWidget(self.home_page)
                 return
         self.page_stack.setCurrentWidget(self.exercise_assessment_page)
-
     def create_dashboard_page(self):
         page = QWidget()
         layout = QVBoxLayout()
@@ -434,6 +487,17 @@ class MBSRApp(QMainWindow):
         reset_btn = QPushButton("Show All Records")
         reset_btn.clicked.connect(lambda: self.update_dashboard(selected_date=None))
         calendar_layout.addWidget(reset_btn)
+        export_btn = QPushButton("Export Data")
+        export_btn.clicked.connect(self.export_user_data)
+        export_btn.setStyleSheet("""
+            font-size: 14px;
+            padding: 8px;
+            background-color: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 5px;
+        """)
+        calendar_layout.addWidget(export_btn)
         layout.addLayout(calendar_layout)
         self.date_label = QLabel("Showing all records")
         layout.addWidget(self.date_label)
@@ -760,6 +824,9 @@ class MBSRApp(QMainWindow):
         self.user_table.setColumnCount(2)
         self.user_table.setHorizontalHeaderLabels(["Username", "Average Completion %"])
         self.user_table.cellClicked.connect(self.show_user_details)
+        self.user_table.setMinimumWidth(600)
+        self.user_table.setColumnWidth(0, 300)
+        self.user_table.setColumnWidth(1, 200)
         layout.addWidget(self.user_table)
         page.setLayout(layout)
         self.update_manage_user()
@@ -1060,18 +1127,17 @@ class MBSRApp(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout()
         anonymous_label = QLabel("Posts are shared anonymously")
-        anonymous_label.setStyleSheet("font-weight: bold; font-size: 16px; color: #E0E0E0; margin-bottom: 10px;")
+        anonymous_label.setStyleSheet("font-weight: bold; font-size: 16px; color: #A9A9A9; margin-bottom: 10px;")
         layout.addWidget(anonymous_label)
         self.post_input = QTextEdit()
         self.post_input.setPlaceholderText("Share your experience anonymously...")
         self.post_input.setMinimumHeight(150)
         self.post_input.setStyleSheet("""
-            font-size: 14px;
+            font-size: 20px;
             padding: 10px;
             border: 1px solid #444;
             border-radius: 5px;
-            background-color: #222;
-            color: #E0E0E0;
+            color: #A9A9A9;
         """)
         layout.addWidget(self.post_input, stretch=1)
         post_btn = QPushButton("Post")
@@ -1092,7 +1158,7 @@ class MBSRApp(QMainWindow):
         self.posts_layout.setSpacing(15)
         self.posts_layout.addStretch()
         scroll_area.setWidget(self.posts_container)
-        scroll_area.setStyleSheet("border: none; background-color: #000;")
+        scroll_area.setStyleSheet("border: none; ")
         layout.addWidget(scroll_area, stretch=2)
         page.setLayout(layout)
         self.update_posts()
@@ -1145,7 +1211,7 @@ class MBSRApp(QMainWindow):
                 widget.deleteLater()
         self.nav_buttons.clear()
         if self.is_admin:
-            nav_button_texts = ["Manage User", "Manage Exercise", "Manage Community"]
+            nav_button_texts = ["Manage User", "Manage Exercise", "Manage Community", "Logout"]
         else:
             nav_button_texts = ["Home", "View Dashboard", "Get Reward", "Exercises List", "Community",
                                 f"Hi {self.username}"]
@@ -1156,16 +1222,21 @@ class MBSRApp(QMainWindow):
             self.nav_buttons.append(button)
 
     def logout(self):
+        # 重置用户状态
         self.user_id = None
         self.is_admin = False
         self.username = "Guest"
         self.stress_before_level = None
         self.current_exercise = None
         self.timer_count = 0
+
+        # 停止可能运行的计时器
+        if hasattr(self, 'timer') and self.timer.isActive():
+            self.timer.stop()
+            del self.timer
+
+        # 重新初始化界面
         self.init_ui()
-        QTimer.singleShot(100, self.update_ui_after_login)
-        QTimer.singleShot(200, self.update_pressure_diagram)
-        QTimer.singleShot(300, self.update_dashboard)
 
     def update_ui_after_login(self):
         if self.is_admin:
@@ -1235,7 +1306,7 @@ class MBSRApp(QMainWindow):
                 ax2.legend(loc='upper right')
                 canvas.axes.set_title(title)
                 canvas.axes.set_xlabel("Date")
-                canvas.axes.tick_params(axis='x', rotation=45)
+                canvas.axes.tick_params(axis='x', rotation=10)
             else:
                 canvas.axes.text(0.5, 0.5, "No data available",
                                  horizontalalignment='center',
